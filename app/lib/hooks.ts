@@ -26,6 +26,10 @@ const DOWNLOAD_SAMPLES = 3;
 const UPLOAD_SAMPLES = 3;
 const DISCARD_HIGHEST_LOWEST = true; // Whether to discard the highest and lowest readings
 
+const CHUNK_SIZE = 1024 * 1024; // 1MB chunks for streaming
+const MIN_TEST_DURATION = 5000; // Minimum 5 seconds per test
+const MAX_TEST_DURATION = 30000; // Maximum 30 seconds per test
+
 export function useSpeedTest() {
     const [testing, setTesting] = useState(false);
     const [testProgress, setTestProgress] = useState(0);
@@ -66,6 +70,117 @@ export function useSpeedTest() {
         return sum / valuesToAverage.length;
     };
 
+    // Helper to round speeds to whole numbers or at most 1 decimal place
+    const formatSpeed = (speed: number): number => {
+        if (speed >= 100) {
+            return Math.round(speed);
+        }
+        return Math.round(speed * 10) / 10;
+    };
+
+    // Function to measure download speed
+    const measureDownloadSpeed = async (): Promise<number> => {
+        const downloadSpeeds: number[] = [];
+        const startTime = performance.now();
+        let totalBytes = 0;
+
+        for (let i = 0; i < DOWNLOAD_SAMPLES; i++) {
+            try {
+                const endpoint = TEST_ENDPOINTS.download[i % TEST_ENDPOINTS.download.length];
+                const response = await fetch(endpoint, { cache: 'no-store' });
+                const reader = response.body?.getReader();
+
+                if (!reader) continue;
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    if (value) {
+                        totalBytes += value.length;
+                        const currentTime = performance.now();
+                        const duration = (currentTime - startTime) / 1000; // seconds
+
+                        // Calculate current speed
+                        const currentSpeed = (totalBytes * 8) / (duration * 1_000_000); // Mbps
+                        downloadSpeeds.push(currentSpeed);
+
+                        // Update progress
+                        const baseProgress = 20; // After ping
+                        const progress = Math.min(baseProgress + (i + 1) / DOWNLOAD_SAMPLES * 40, 60);
+                        updateProgress(progress);
+                    }
+
+                    // Check if we've tested long enough
+                    if (performance.now() - startTime > MAX_TEST_DURATION) break;
+                }
+
+                // Small delay between tests
+                await new Promise(resolve => setTimeout(resolve, 200));
+            } catch (error) {
+                console.error("Download test failed:", error);
+            }
+        }
+
+        // Take the median of the last few measurements for stability
+        const recentSpeeds = downloadSpeeds.slice(-5);
+        recentSpeeds.sort((a, b) => a - b);
+        const medianSpeed = recentSpeeds[Math.floor(recentSpeeds.length / 2)];
+
+        return formatSpeed(medianSpeed);
+    };
+
+    // Function to measure upload speed
+    const measureUploadSpeed = async (): Promise<number> => {
+        const uploadSpeeds: number[] = [];
+        const startTime = performance.now();
+        let totalBytes = 0;
+
+        for (let i = 0; i < UPLOAD_SAMPLES; i++) {
+            try {
+                const chunkSize = TEST_FILE_SIZES.medium;
+                const chunk = new Uint8Array(chunkSize);
+                const blob = new Blob([chunk]);
+
+                const uploadStart = performance.now();
+                const response = await fetch(TEST_ENDPOINTS.upload[0], {
+                    method: 'POST',
+                    body: blob,
+                    headers: {
+                        'Content-Type': 'application/octet-stream'
+                    },
+                    cache: 'no-store'
+                });
+
+                if (response.ok) {
+                    totalBytes += chunkSize;
+                    const duration = (performance.now() - uploadStart) / 1000;
+                    const speed = (chunkSize * 8) / (duration * 1_000_000); // Mbps
+                    uploadSpeeds.push(speed);
+                }
+
+                // Update progress
+                const baseProgress = 60;
+                const progress = Math.min(baseProgress + (i + 1) / UPLOAD_SAMPLES * 40, 100);
+                updateProgress(progress);
+
+                // Check if we've tested long enough
+                if (performance.now() - startTime > MAX_TEST_DURATION) break;
+
+                await new Promise(resolve => setTimeout(resolve, 200));
+            } catch (error) {
+                console.error("Upload test failed:", error);
+            }
+        }
+
+        // Take the median of the last few measurements
+        const recentSpeeds = uploadSpeeds.slice(-5);
+        recentSpeeds.sort((a, b) => a - b);
+        const medianSpeed = recentSpeeds[Math.floor(recentSpeeds.length / 2)];
+
+        return formatSpeed(medianSpeed);
+    };
+
     // Function to measure ping
     const measurePing = async (): Promise<number> => {
         const pingTimes: number[] = [];
@@ -77,118 +192,18 @@ export function useSpeedTest() {
                 const endTime = performance.now();
                 pingTimes.push(endTime - startTime);
 
-                // Update progress after each ping measurement
-                const increment = (i + 1) / PING_SAMPLES * 20; // Ping is 20% of test
-                updateProgress(Math.min(20, increment));
-
-                // Small delay between ping tests
+                updateProgress(Math.min(20, ((i + 1) / PING_SAMPLES) * 20));
                 await new Promise(resolve => setTimeout(resolve, 100));
             } catch (error) {
                 console.error("Ping test failed:", error);
             }
         }
 
-        return calculateAverage(pingTimes);
-    };
+        // Remove outliers and take the median
+        const sortedPings = [...pingTimes].sort((a, b) => a - b);
+        const medianPing = sortedPings[Math.floor(sortedPings.length / 2)];
 
-    // Function to measure download speed
-    const measureDownloadSpeed = async (): Promise<number> => {
-        const downloadSpeeds: number[] = [];
-
-        for (let i = 0; i < DOWNLOAD_SAMPLES; i++) {
-            try {
-                // Use different file sizes for more accurate measurement
-                const endpoint = TEST_ENDPOINTS.download[i % TEST_ENDPOINTS.download.length];
-
-                // Warm-up connection to reduce DNS and TCP handshake impact
-                await fetch(endpoint, { method: 'HEAD', cache: 'no-store' });
-
-                const startTime = performance.now();
-                const response = await fetch(endpoint, { cache: 'no-store' });
-                const blob = await response.blob();
-                const endTime = performance.now();
-
-                // Calculate speed in Mbps (Megabits per second)
-                // Size in bytes * 8 to convert to bits, divided by time in seconds
-                const fileSizeInBits = blob.size * 8;
-                const durationInSeconds = (endTime - startTime) / 1000;
-                const speedMbps = fileSizeInBits / durationInSeconds / 1_000_000;
-
-                // If this is not a valid reading, skip it
-                if (speedMbps > 0) {
-                    downloadSpeeds.push(speedMbps);
-                }
-
-                // Update progress after each download test
-                const baseProgress = 20; // After ping
-                const increment = (i + 1) / DOWNLOAD_SAMPLES * 40; // Download is 40% of test
-                updateProgress(Math.min(baseProgress + increment, 60));
-
-                // Small delay between tests
-                await new Promise(resolve => setTimeout(resolve, 200));
-            } catch (error) {
-                console.error("Download test failed:", error);
-            }
-        }
-
-        return calculateAverage(downloadSpeeds);
-    };
-
-    // Function to measure upload speed
-    const measureUploadSpeed = async (): Promise<number> => {
-        const uploadSpeeds: number[] = [];
-
-        for (let i = 0; i < UPLOAD_SAMPLES; i++) {
-            try {
-                // Generate test data of varying sizes for more accurate measurement
-                const dataSize = i === 0 ? TEST_FILE_SIZES.small :
-                    (i === 1 ? TEST_FILE_SIZES.medium : TEST_FILE_SIZES.large);
-
-                // Generate random data of specified size
-                const testData = new Blob([new ArrayBuffer(dataSize)]);
-
-                // Warm up connection to reduce TCP slow start impact
-                await fetch(TEST_ENDPOINTS.upload[0], {
-                    method: 'HEAD',
-                    cache: 'no-store'
-                });
-
-                const startTime = performance.now();
-                const response = await fetch(TEST_ENDPOINTS.upload[0], {
-                    method: 'POST',
-                    body: testData,
-                    headers: {
-                        'Content-Type': 'application/octet-stream'
-                    },
-                    cache: 'no-store'
-                });
-                const endTime = performance.now();
-
-                if (response.ok) {
-                    // Calculate speed in Mbps (Megabits per second)
-                    const fileSizeInBits = testData.size * 8;
-                    const durationInSeconds = (endTime - startTime) / 1000;
-                    const speedMbps = fileSizeInBits / durationInSeconds / 1_000_000;
-
-                    // Only add valid readings
-                    if (speedMbps > 0) {
-                        uploadSpeeds.push(speedMbps);
-                    }
-                }
-
-                // Update progress after each upload test
-                const baseProgress = 60; // After ping and download
-                const increment = (i + 1) / UPLOAD_SAMPLES * 40; // Upload is 40% of test
-                updateProgress(Math.min(baseProgress + increment, 100));
-
-                // Small delay between tests
-                await new Promise(resolve => setTimeout(resolve, 200));
-            } catch (error) {
-                console.error("Upload test failed:", error);
-            }
-        }
-
-        return calculateAverage(uploadSpeeds);
+        return Math.round(medianPing); // Round ping to whole number
     };
 
     // Main function to run the complete speed test
@@ -234,9 +249,9 @@ export function useSpeedTest() {
 
             // Set final result
             const finalResult = {
-                downloadSpeed: Math.round(downloadResult * 10) / 10, // Round to 1 decimal place
-                uploadSpeed: Math.round(uploadResult * 10) / 10, // Round to 1 decimal place
-                ping: Math.round(pingResult),
+                downloadSpeed: downloadResult,
+                uploadSpeed: uploadResult,
+                ping: pingResult,
             };
 
             setResult(finalResult);
