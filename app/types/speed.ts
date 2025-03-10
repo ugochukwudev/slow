@@ -1,7 +1,7 @@
 export interface SpeedTestResult {
     downloadSpeed: number | null;
-    uploadSpeed: number | null;
-    ping: number | null;
+    uploadSpeed: null | number;
+    ping: null | number;
     timestamp?: Date;
 }
 
@@ -15,7 +15,7 @@ export interface AverageSpeedData {
     lastUpdated?: Date;
 }
 
-// Network information types
+// Network location type
 export interface NetworkLocation {
     city: string | null;
     region: string | null;
@@ -23,6 +23,7 @@ export interface NetworkLocation {
     loc?: string;
 }
 
+// Network information interface
 export interface NetworkInfo {
     ip: string;
     provider: string;

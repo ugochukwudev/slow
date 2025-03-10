@@ -2,13 +2,16 @@
 
 import { toast } from "sonner";
 import { Button } from "./ui";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { TestProgress, TestResult } from "./ui";
 import { useSpeedTest, useNetworkInfo } from "@/app/lib/hooks";
 
 export default function SpeedTest() {
   const [averageSpeedData, setAverageSpeedData] =
     useState<AverageSpeedData | null>(null);
+
+  // Use a ref to track if component is mounted to avoid state updates after unmount
+  const isMounted = useRef(false);
 
   const {
     testing,
@@ -21,26 +24,46 @@ export default function SpeedTest() {
 
   const { networkInfo, loading: networkInfoLoading } = useNetworkInfo();
 
+  // Set mounted state on component mount
+  useEffect(() => {
+    isMounted.current = true;
+    return () => {
+      isMounted.current = false;
+    };
+  }, []);
+
   // Fetch average speeds when network info is available
   useEffect(() => {
-    if (networkInfo) {
-      const locationKey = `${networkInfo.location.city || "unknown"}-${networkInfo.location.region || "unknown"
-        }-${networkInfo.location.country || "unknown"}`;
-      fetchAverageSpeedData(locationKey, networkInfo.provider);
+    if (networkInfo && isMounted.current) {
+      const locationKey = `${networkInfo.location?.city || "unknown"}-${networkInfo.location?.region || "unknown"
+        }-${networkInfo.location?.country || "unknown"}`;
+
+      // Only fetch if we have a valid location key
+      if (locationKey && networkInfo.provider) {
+        fetchAverageSpeedData(locationKey, networkInfo.provider);
+      }
     }
-  }, [networkInfo]);
+  }, [networkInfo]); // Only depends on networkInfo
 
   const fetchAverageSpeedData = async (
     locationKey: string,
     provider: string
   ) => {
+    if (!isMounted.current) return;
+
     try {
       const response = await fetch(
-        `/api/average-speeds?locationKey=${locationKey}&provider=${provider}`
+        `/api/average-speeds?locationKey=${encodeURIComponent(locationKey)}&provider=${encodeURIComponent(provider)}`
       );
-      if (response.ok) {
+
+      if (response.ok && isMounted.current) {
         const data = await response.json();
-        setAverageSpeedData(data);
+        // Use setTimeout to ensure state updates happen outside render cycle
+        setTimeout(() => {
+          if (isMounted.current) {
+            setAverageSpeedData(data);
+          }
+        }, 0);
       }
     } catch (error) {
       console.error("Error fetching average speed data:", error);
@@ -56,19 +79,28 @@ export default function SpeedTest() {
     try {
       const result = await startTest();
 
+      // Only process results if still mounted
+      if (!isMounted.current) return;
+
       // After test completes, update average speed data
       if (result.downloadSpeed && result.uploadSpeed && result.ping) {
-        const locationKey = `${networkInfo.location.city}-${networkInfo.location.region}-${networkInfo.location.country}`;
+        const locationKey = `${networkInfo.location?.city || "unknown"}-${networkInfo.location?.region || "unknown"
+          }-${networkInfo.location?.country || "unknown"}`;
+
         await updateAverageSpeedData(locationKey, networkInfo.provider, result);
 
-        // Refresh average speed data
-        await fetchAverageSpeedData(locationKey, networkInfo.provider);
-
-        toast.success("Speed test completed successfully!");
+        // Only refresh data if still mounted
+        if (isMounted.current) {
+          // Refresh average speed data
+          await fetchAverageSpeedData(locationKey, networkInfo.provider);
+          toast.success("Speed test completed successfully!");
+        }
       }
     } catch (error) {
       console.error("Error during speed test:", error);
-      toast.error("Failed to complete speed test. Please try again.");
+      if (isMounted.current) {
+        toast.error("Failed to complete speed test. Please try again.");
+      }
     }
   };
 

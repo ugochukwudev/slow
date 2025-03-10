@@ -1,161 +1,134 @@
 "use client";
 
-import { toast } from "sonner";
-import { useState, useReducer } from "react";
-import { useRouter } from "next/navigation";
-import { Button } from "@/app/components/ui";
-// import { API_URL, API_KEY } from "@/app/constants";
-import { otpReducer, initialOtpState } from "@/app/lib/otp";
+import React, { useState, useRef, useEffect } from "react";
+import Button from "./button";
 
-export default function OTP() {
-  const router = useRouter();
-  const [loading, setLoading] = useState(false);
-  const [otpState, dispatch] = useReducer(otpReducer, initialOtpState);
+interface OTPInputProps {
+  length?: number;
+  onComplete?: (otp: string) => void;
+  loading?: boolean;
+}
 
-  const handleOtpSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    setLoading(true);
+export default function OTPInput({
+  length = 6,
+  onComplete,
+  loading = false
+}: OTPInputProps) {
+  const [otp, setOtp] = useState<string[]>(new Array(length).fill(""));
+  const [activeInput, setActiveInput] = useState<number>(0);
+  const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
+  const isOtpValid = otp.every(digit => digit !== "");
 
-    try {
-      const otpString = Object.values(otpState).join("");
+  useEffect(() => {
+    inputRefs.current = inputRefs.current.slice(0, length);
+  }, [length]);
 
-      const response = await fetch(`endpoint`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ otp: otpString }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || "OTP verification failed");
-      }
-
-      if (data.success) {
-        toast.success("OTP verified successfully");
-        dispatch({ type: "reset", payload: "" });
-        router.push("/signin");
-      } else {
-        throw new Error(data.message || "Invalid OTP");
-      }
-    } catch (err) {
-      dispatch({ type: "reset", payload: "" });
-      toast.error(
-        err instanceof Error ? err.message : "OTP verification failed"
-      );
-    } finally {
-      setLoading(false);
-    }
+  // Create a ref callback that doesn't return a value
+  const setRef = (index: number) => (el: HTMLInputElement | null) => {
+    inputRefs.current[index] = el;
   };
 
-  const isOtpValid = Object.values(otpState).every((value) => value !== "");
-
-  const handleOtpChange = (
-    e: React.ChangeEvent<HTMLInputElement>,
-    inputKey: string
-  ) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>, index: number) => {
     const value = e.target.value;
-    const lastChar = value.slice(-1); // Get only the last character
-    const numValue = lastChar === "" ? -1 : Number(lastChar);
+    if (isNaN(Number(value))) return;
 
-    if ((numValue >= 0 && numValue < 10) || lastChar === "") {
-      dispatch({ type: inputKey, payload: lastChar });
+    const newOtp = [...otp];
+    // Only take the last character if multiple characters are pasted/entered
+    newOtp[index] = value.substring(value.length - 1);
+    setOtp(newOtp);
 
-      const currentIndex = parseInt(inputKey.split("_")[1]) - 1;
-
-      // Move to next input if a number was entered
-      if (lastChar !== "") {
-        const nextInput = document.getElementById(
-          `otp-${currentIndex + 2}`
-        ) as HTMLInputElement;
-        if (nextInput) {
-          nextInput.focus();
-        }
+    // Move to next input if value is entered
+    if (value !== "") {
+      if (index < length - 1) {
+        inputRefs.current[index + 1]?.focus();
+        setActiveInput(index + 1);
       }
     }
   };
 
-  const handleOtpPaste = (e: React.ClipboardEvent) => {
-    e.preventDefault();
-    const pastedData = e.clipboardData.getData("text").trim();
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, index: number) => {
+    if (e.key === "Backspace") {
+      e.preventDefault();
+      if (otp[index] !== "") {
+        // Clear current input
+        const newOtp = [...otp];
+        newOtp[index] = "";
+        setOtp(newOtp);
+      } else if (index > 0) {
+        // Move to previous input
+        inputRefs.current[index - 1]?.focus();
+        setActiveInput(index - 1);
+      }
+    } else if (e.key === "ArrowLeft" && index > 0) {
+      e.preventDefault();
+      inputRefs.current[index - 1]?.focus();
+      setActiveInput(index - 1);
+    } else if (e.key === "ArrowRight" && index < length - 1) {
+      e.preventDefault();
+      inputRefs.current[index + 1]?.focus();
+      setActiveInput(index + 1);
+    }
+  };
 
-    if (pastedData.length === 6 && /^\d+$/.test(pastedData)) {
-      const digits = pastedData.split("");
-      digits.forEach((digit, index) => {
-        dispatch({ type: `input_${index + 1}`, payload: digit });
-      });
-      // Focus last input after paste
-      document.getElementById("otp-6")?.focus();
+  const handlePaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    const pastedData = e.clipboardData.getData("text/plain").trim();
+    if (isNaN(Number(pastedData))) return;
+
+    const newOtp = [...otp];
+    for (let i = 0; i < Math.min(pastedData.length, length); i++) {
+      newOtp[i] = pastedData[i];
+    }
+    setOtp(newOtp);
+
+    // Focus the next empty input or the last input
+    const nextEmptyIndex = newOtp.findIndex(digit => digit === "");
+    const focusIndex = nextEmptyIndex === -1 ? length - 1 : nextEmptyIndex;
+    inputRefs.current[focusIndex]?.focus();
+    setActiveInput(focusIndex);
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isOtpValid && onComplete) {
+      onComplete(otp.join(""));
     }
   };
 
   return (
-    <form onSubmit={handleOtpSubmit} className="flex flex-col gap-4">
-      <div className="flex justify-between gap-2">
-        {Object.keys(initialOtpState).map((key, index) => (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <div className="flex gap-2 justify-center">
+        {otp.map((digit, index) => (
           <input
-            key={key}
+            key={index}
+            ref={setRef(index)}
             type="text"
+            inputMode="numeric"
+            autoComplete="one-time-code"
             pattern="\d*"
             maxLength={1}
-            placeholder="*"
-            inputMode="numeric"
-            value={otpState[key]}
-            id={`otp-${index + 1}`}
-            className="w-12 h-12 text-center bg-[#283142] p-4 rounded-[12px] text-white placeholder:text-[#FFFFFF80] font-aloeSemBold text-[24px] leading-[22.4px] focus:outline-none focus:ring-0"
-            onPaste={index === 0 ? handleOtpPaste : undefined}
-            onChange={(e) => handleOtpChange(e, key)}
-            onKeyDown={(e) => {
-              const currentIndex = parseInt(key.split("_")[1]) - 1;
-
-              switch (e.key) {
-                case "Backspace":
-                  if (!otpState[key]) {
-                    const prevInput = document.getElementById(
-                      `otp-${currentIndex}`
-                    ) as HTMLInputElement;
-                    if (prevInput) {
-                      prevInput.focus();
-                    }
-                  }
-                  break;
-                case "Tab":
-                  e.preventDefault();
-                  const nextInput = document.getElementById(
-                    `otp-${currentIndex + 2}`
-                  ) as HTMLInputElement;
-                  if (nextInput) {
-                    nextInput.focus();
-                  }
-                  break;
-                case "ArrowLeft":
-                  e.preventDefault();
-                  const leftInput = document.getElementById(
-                    `otp-${currentIndex}`
-                  ) as HTMLInputElement;
-                  if (leftInput) {
-                    leftInput.focus();
-                  }
-                  break;
-                case "ArrowRight":
-                  e.preventDefault();
-                  const rightInput = document.getElementById(
-                    `otp-${currentIndex + 2}`
-                  ) as HTMLInputElement;
-                  if (rightInput) {
-                    rightInput.focus();
-                  }
-                  break;
+            value={digit}
+            onChange={e => handleChange(e, index)}
+            onKeyDown={e => handleKeyDown(e, index)}
+            onPaste={handlePaste}
+            className={`w-12 h-12 text-center text-xl font-semibold rounded-lg border-2 
+              bg-black/30 backdrop-blur-sm text-white
+              ${index === activeInput
+                ? "border-purple-500"
+                : "border-gray-700"
               }
-            }}
-            onFocus={(e) => e.target.select()}
-            autoComplete="off"
+              focus:border-purple-500 focus:outline-none
+              transition-colors`}
           />
         ))}
       </div>
-      <Button type="submit" loading={loading} disabled={!isOtpValid || loading}>
+      <Button
+        type="submit"
+        loading={loading}
+        disabled={!isOtpValid || loading}
+        variant="primary"
+        className="w-full"
+      >
         Verify OTP
       </Button>
     </form>
